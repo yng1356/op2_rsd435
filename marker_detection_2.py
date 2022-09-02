@@ -1,15 +1,33 @@
 # -*- coding: utf-8 -*-
 
-import pyrealsense2 as rs
-import numpy as np
-import cv2 as cv
-from matplotlib import pyplot as plt
-
-
+# =============================================================================
+# Import libraries and modules
+# =============================================================================
 import os
 import argparse
 from sys import exit
 
+import math
+import numpy as np
+import cv2 as cv
+from matplotlib import pyplot as plt
+from matplotlib import animation
+import pyrealsense2 as rs
+
+from sklearn import mixture, cluster
+
+import xlsxwriter
+
+import ColorDetect
+import ContourDetect
+
+cd = ColorDetect.ColorDetect()
+
+
+
+# =============================================================================
+# Class definition
+# =============================================================================
 
 class RealSenseCamera:
     def __init__(self):
@@ -24,25 +42,19 @@ class RealSenseCamera:
         device = pipeline_profile.get_device()
         # device_product_line = str(device.get_info(rs.camera_info.product_line))
 
-        # Getting the depth sensor's depth scale (see rs-align example for explanation)
-        depth_sensor = pipeline_profile.get_device().first_depth_sensor()
-        self.depth_scale = depth_sensor.get_depth_scale()
-        print(self.depth_scale)
+        # Getting the depth sensor's depth scale?
         
-        clipping_distance_in_meters = 1.2 #1 meter
-        self.clipping_distance = clipping_distance_in_meters/self.depth_scale
-
+        # clipping distance?
         
-        preset_options(device)
-
+        # preset option
+        
         config.enable_stream(rs.stream.depth, 1280, 720, rs.format.z16, 30)
         config.enable_stream(rs.stream.color, 1280, 720, rs.format.bgr8, 30)
         
 
-
-
         # create pipeline
         profile = self.pipeline.start(config)
+        
         
     def get_frame(self):
         # create an aign object
@@ -53,7 +65,13 @@ class RealSenseCamera:
         # skip the first few frames
         for _ in range(10):
             self.pipeline.wait_for_frames()
-            
+        
+        centre_x = []
+        centre_y = []
+        detections = 0
+        frame_no = 0
+        
+        file = open("color_points_stream.txt","w")
             
         while True:
             
@@ -69,136 +87,68 @@ class RealSenseCamera:
 
             
             self.depth_frame = depth_frame
-
             
+            # get intrinsic and extrinsic parameters
+            self.color_intrin = color_frame.profile.as_video_stream_profile().intrinsics
+            self.depth_intrin = depth_frame.profile.as_video_stream_profile().intrinsics
+            
+            depth_to_color_extrin = depth_frame.profile.get_extrinsics_to(color_frame.profile)
+            color_to_depth_extrin = color_frame.profile.get_extrinsics_to(depth_frame.profile)
+            
+            global color_image, depth_image
             color_image = np.asanyarray(color_frame.get_data())
             depth_image = np.asanyarray(depth_frame.get_data())
             
-            frame_contour = color_image.copy()
-
-            
-            
-            # gray out the background! to avoid detecting other place            
-            gray_color = 153
-            depth_image_3d = np.dstack((depth_image,depth_image,depth_image)) #depth image is 1 channel, color is 3 channels
-            frame_contour = np.where((depth_image_3d > self.clipping_distance) | (depth_image_3d <= 0), gray_color, color_image)
-            
-
-            
-            frame_contour = cv.cvtColor(frame_contour, cv.COLOR_RGB2BGR) 
+            color_copy = color_image.copy()
+            color_copy = cv.cvtColor(color_copy, cv.COLOR_BGR2RGB) 
             # plt.matshow(frame_contour)
-            mask_r, mask_g, mask_b = rgb_masking(frame_contour)
+            
+            # gray out the background with clipping distance
+            
+            # rgb masks
             
             
-            contours_r, _ = cv.findContours(mask_r,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE)
-
-            # loop over the contours
-            for cnt in contours_r:
+            # contour
+            
+            
+            
+            
+            
                 
-                area = cv.contourArea(cnt)
-                if area > 30 and area < 3000:
                 
-                    arc = cv.arcLength(cnt,True)
-                    epsilon = 0.02*arc
-                    approx = cv.approxPolyDP(cnt,epsilon,True)
-                    
-                    # rectangle marker
-                    if len(approx) == 4:
-                        rect = cv.minAreaRect(cnt)
-                        w, h = rect[1]
-                        if abs(w-h) <= 5:
-                            box = np.int0(cv.boxPoints(rect))
-                            cv.drawContours(frame_contour,[box],0,(255,0,0),2)
-        
-                            M = cv.moments(cnt)
-                            if M['m00'] != 0.0:
-                                cx = int(M["m10"] / M["m00"])
-                                cy = int(M["m01"] / M["m00"])
-                                cv.circle(frame_contour, (cx, cy), 3, (255, 0, 0), -1)
-        
-                            cv.putText(frame_contour, "Rec", (cx, cy), cv.FONT_HERSHEY_SIMPLEX,
-                                   0.5, (255, 0, 0), 2)
-            
-            contours_g, _ = cv.findContours(mask_g,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE)
-
-            # circle marker
-            for cnt in contours_g:
-                # Minimum Enclosing Circle
-                area = cv.contourArea(cnt)
-                if area > 30 and area < 3000:
-                    arc = cv.arcLength(cnt,True)
-                    epsilon = 0.02*arc
-                    approx = cv.approxPolyDP(cnt,epsilon,True)
-                    
-                    x, y, w, h = cv.boundingRect(approx)
-                    if abs(w-h)<=5 and len(approx) >= 8:
-        #                 (cx,cy),radius = cv.minEnclosingCircle(cnt)
-        #                 cx = int(cx)
-        #                 cy = int(cy)
-        #                 cv.circle(frame_contour,(cx, cy),int(radius),(0,255,0),2)
-        #                 
-        
-                        M = cv.moments(cnt)
-                        if M['m00'] != 0.0:
-                            cx = int(M['m10']/M['m00'])
-                            cy = int(M['m01']/M['m00'])
-                            cv.rectangle(frame_contour, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                            cv.circle(frame_contour, (cx, cy), 3, (0, 255, 0), -1)
-                            cv.putText(frame_contour, "Circle", (cx, cy), cv.FONT_HERSHEY_SIMPLEX,
-                                0.5, (0, 255, 0), 2)
-                            
-            contours_b, _ = cv.findContours(mask_b,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE)  
-            for cnt in contours_r:
+           ## depth image processing     
                 
-                area = cv.contourArea(cnt)
-                if area > 10 and area < 3000:
                 
-                    arc = cv.arcLength(cnt,True)
-                    epsilon = 0.02*arc
-                    approx = cv.approxPolyDP(cnt,epsilon,True)
-                    # triangle marker
-                    if len(approx) == 3:
-                        rect = cv.minAreaRect(cnt)
-                        w, h = rect[1]
-                        if abs(w-h) <= 5:
-                            cv.drawContours(frame_contour,[cnt],0,(255,0,255),2)
-                            M = cv.moments(cnt)
-                            if M['m00'] != 0.0:
-                                cx = int(M["m10"] / M["m00"])
-                                cy = int(M["m01"] / M["m00"])
-                                cv.circle(frame_contour, (cx, cy), 3, (255,0,255), -1)
-                            cv.putText(frame_contour, "Tri", (cx, cy), cv.FONT_HERSHEY_SIMPLEX,
-                            0.5, (255,0,255), 2)
+                
+                
+                
+                
+                
+                
+                
             
-            # post-processing
-            # visualisation
-    
+            # visualisation - colorise dpeth frame to colormap
+            colorizer = rs.colorizer()
+            colorizer.set_option(rs.option.color_scheme, 3); # white to black
+            colorizer.set_option(rs.option.min_distance, 0.3)
+            colorizer.set_option(rs.option.max_distance, 1.5)
             
-            # colorise dpeth frame to colormap
-            depth_color_frame = rs.colorizer().colorize(depth_frame)
-    
             # Convert frames to np.array
-            depth_color_image = np.asanyarray(depth_color_frame.get_data())
-            # color_image = np.asanyarray(color_frame.get_data())
-            # color_cvt = cv.cvtColor(color_image, cv.COLOR_BGR2RGB)
-                
+            global depth_color_image
+            depth_color_image = np.asanyarray(colorizer.colorize(depth_frame).get_data())
             
-            # get color intrinsic parameters
-            # self.color_intrin = color_frame.profile.as_video_stream_profile().intrinsics
-            
-            
-            # post_processing
-            
-            
+            # plt.colorbar(plt.matshow(depth_image*self.depth_scale, cmap = "gray_r"))
+            # plt.colorbar(plt.matshow(depth_color_image, cmap = "gray"))
 
-             #fps
+            
+            #fps
             fps = cv.getTickFrequency()/(cv.getTickCount()-timer)
-            cv.putText(frame_contour, 'FPS: ' + str(int(fps)), (75, 50), cv.FONT_HERSHEY_SIMPLEX, 0.5,(0, 0, 255), 1)
+            cv.putText(color_copy, 'FPS: ' + str(int(fps)), (75, 50), cv.FONT_HERSHEY_SIMPLEX, 0.5,(0, 0, 255), 1)
             
             
-            # plt.matshow(frame_contour)
-            frame_contour = cv.cvtColor(frame_contour, cv.COLOR_RGB2BGR)            
-            images = np.hstack((frame_contour, depth_color_image))
+            
+            color_copy = cv.cvtColor(color_copy, cv.COLOR_RGB2BGR)            
+            images = np.hstack((color_copy, depth_color_image))
             
             # show images in opencv window
             show_image(images)
@@ -211,8 +161,6 @@ class RealSenseCamera:
         
     def release(self):
         self.pipeline.stop()
-
-
 
 
 
@@ -230,17 +178,19 @@ class ROSBagFile:
         device = pipeline_profile.get_device()
         
         
+        
+        # depth scale "depth unit" 
+        #  - translates pixels to meters: 0.0001 metre
         depth_sensor = pipeline_profile.get_device().first_depth_sensor()
         self.depth_scale = depth_sensor.get_depth_scale()
         print(self.depth_scale)
         
-        clipping_distance_in_meters = 1.2 #1 meter
-        self.clipping_distance = clipping_distance_in_meters/self.depth_scale
+        # clipping distance
+        # clipping_distance_in_meters = 1.5 # meter
+        # self.clipping_distance = clipping_distance_in_meters/self.depth_scale
 
         playback = device.as_playback()
         playback.set_real_time(False)
-
-        
 
     def get_frame(self):
         
@@ -254,13 +204,36 @@ class ROSBagFile:
         for _ in range(10):
             self.pipeline.wait_for_frames()
            
+        marker_size = 40 # 40mm
+    
+        H = 720 # 720
+        W = 1280 # 1280
         
-        centre_x = []
-        centre_y = []
-        detected = 0
+        
+        x1 = int(np.round(0.25*W))
+        y1 = int(np.round(0.15*H))
+        w = 768
+        h = 504
+        roi = initialise_roi(x1, y1, w, h)
+        
+        [x1, y1, w, h] = roi
+        
+        
+        squ_r, cir_r, tri_r, cro_r = [],[],[],[]
+        squ_g, cir_g, tri_g, cro_g = [],[],[],[]
+        squ_b, cir_b, tri_b, cro_b = [],[],[],[]
+        
+        
         frame_no = 0
         
-        file = open("accuracy_data.txt","w")
+        TPs = np.zeros((3,4)).astype(int)
+        FPs = np.zeros((3,4)).astype(int)
+        
+        
+        
+        cv.namedWindow("Stream", cv.WINDOW_AUTOSIZE)
+        
+        file = open("accuracy_data_bag.txt","w")
         
         while True:
             timer = cv.getTickCount()
@@ -272,240 +245,241 @@ class ROSBagFile:
             # get frameset
             frames = self.pipeline.wait_for_frames()
             frame_no += 1
+            print("frame: ",frame_no)
             
             # align depth and color frames
             aligned_frames = align.process(frames)
             color_frame = aligned_frames.get_color_frame()
             depth_frame = aligned_frames.get_depth_frame()
 
-            
             self.depth_frame = depth_frame
 
+            # get intrinsic and extrinsic parameters
+            self.color_intrin = color_frame.profile.as_video_stream_profile().intrinsics
+            self.depth_intrin = depth_frame.profile.as_video_stream_profile().intrinsics
             
+            depth_to_color_extrin = depth_frame.profile.get_extrinsics_to(color_frame.profile)
+            color_to_depth_extrin = color_frame.profile.get_extrinsics_to(depth_frame.profile)
+            
+            
+            global color_image, depth_image
             color_image = np.asanyarray(color_frame.get_data())
             depth_image = np.asanyarray(depth_frame.get_data())
             
-            frame_contour = color_image.copy()
+            
+            
+            ## colour image processing
+            color_copy = color_image.copy()
+            
+            # resize roi image
+            resize_color = color_copy[y1:y1+h, x1:x1+w, :]
+            plt.matshow(resize_color)
+            
+            # rgb 3d scatter plot
+            filtered_points, points_idx = cd.rgb_scatter_plotting(resize_color,stepsize=1)
+            
+            # rgb clustering and masking
+            cluster_r, cluster_g, cluster_b, idx_r, idx_g, idx_b = cd.rgb_kmeans(filtered_points,points_idx, k=3)
+            # rgb_GMM(color_copy, n_components=10, p_thershold=0.95)
+            
+            # hsv scatter
+            # filtered_points = cd.hsv_scatter_potting(resize_color,stepsize=100)
+            # cd.hsv_kmeans(filtered_points, k=3)
+            
+            
+            
+            mask_r = cd.seperate_rgb_masks(H, W, resize_color, roi, cluster_r, idx_r)
+            mask_g = cd.seperate_rgb_masks(H, W, resize_color, roi, cluster_g, idx_g)
+            mask_b = cd.seperate_rgb_masks(H, W, resize_color, roi, cluster_b, idx_b)
+            # plt.matshow(mask_r)
+            # plt.matshow(mask_g)
+            # plt.matshow(mask_b)
+           
+            
+            # find contour
+            mask_r = ContourDetect.convert_to_uint8(mask_r)
+            mask_g = ContourDetect.convert_to_uint8(mask_g)
+            mask_b = ContourDetect.convert_to_uint8(mask_b)
+            
+            cp_squ_r, cp_cir_r, cp_tri_r, cp_cro_r, detect_r, FP_r = ContourDetect.find_contour(mask_r, color_copy, marker_size)
+            cp_squ_g, cp_cir_g, cp_tri_g, cp_cro_g, detect_g, FP_g = ContourDetect.find_contour(mask_g, color_copy, marker_size)
+            cp_squ_b, cp_cir_b, cp_tri_b, cp_cro_b, detect_b, FP_b = ContourDetect.find_contour(mask_b, color_copy, marker_size)
 
+            # plt.matshow(color_copy)
             
-            # gray out the background! to avoid detecting other place            
-            gray_color = 153
-            depth_image_3d = np.dstack((depth_image,depth_image,depth_image)) #depth image is 1 channel, color is 3 channels
-            frame_contour = np.where((depth_image_3d > self.clipping_distance) | (depth_image_3d <= 0), gray_color, color_image)
+            if cp_squ_r:
+                squ_r.extend(cp_squ_r)
+            if cp_cir_r:
+                cir_r.extend(cp_cir_r)
+            if cp_tri_r:
+                tri_r.extend(cp_tri_r)
+            if cp_cro_r:
+                cro_r.extend(cp_cro_r)
             
+            if cp_squ_g:
+                squ_g.extend(cp_squ_g)
+            if cp_cir_g:
+                cir_g.extend(cp_cir_g)
+            if cp_tri_g:
+                tri_g.extend(cp_tri_g)
+            if cp_cro_g:
+                cro_g.extend(cp_cro_g)
+                
+            if cp_squ_b:
+                squ_r.extend(cp_squ_b)
+            if cp_cir_b:
+                cir_r.extend(cp_cir_b)
+            if cp_tri_b:
+                tri_r.extend(cp_tri_b)
+            if cp_cro_b:
+                cro_r.extend(cp_cro_b)
+            
+            # # detect "offset"
+            # cx_squ_r, cy_squ_r, s_squ_r, offset_no_squ_r = remove_outlier(squ_r)
+            # remove_outlier(cir_r)
+            # remove_outlier(tri_r)
+            # remove_outlier(squ_r)
+            
+            
+            # ## depth image processing
+            # depth_point = get_depth_and_point(self.depth_frame, [cx_squ_r, cy_squ_r], self.color_intrin)
+            # print(depth_point)
+            
+            #ppm
+            
+            #IoU
+            
+            
+            ## Accuracy 
+            # True positive
+            new_detection = np.array([detect_r, detect_g, detect_b])
+            TPs = TPs + new_detection
+            
+            # False positive
+            new_FP = np.array([FP_r, FP_g, FP_b])
+            FPs = FPs + new_FP
+            # print(FPs)
+                
+            # False negative
+            FNs = (np.ones((3,4)).astype(int))*frame_no-TPs
+            
+            #True negative
+            TNs = np.zeros((3,4)).astype(int)
+            
+            
+            # output accuracy
+            
+            np.seterr(invalid='ignore')
+            
+            precision = TPs/(TPs+FPs)
+            recall = TPs/(TPs+FNs)
+            F1score = (precision*recall)/((precision+recall)/2)
+            
+            precision[np.isnan(precision)] = 0
+            recall[np.isnan(recall)] = 0
+            F1score[np.isnan(F1score)] = 0
+            
+            
+            
+            
+            # morpho
+            # dst_dil = morpho_trans(depth_image, (9,9))
+            # plt.matshow(dst_dil, cmap = 'gray')
+   
+            # reset roi (AFTER THE DETECTION)
+            
+            
+            
+            
+            
+            
+            # write into file
+            # file.write("\n\n frame no.: "+str(frame_no)+\
+            #             "\n detected: "+str(new_detect)+\
+            #             "   %detect: "+str(perc_detect)+\
+            #             "\n centre estimation:"+str([mu_x, mu_y])+\
+            #             "\n 3D point: "+str(mu_3d))#+\
+            #             # "\n accuracy: "+str(accuracy))
+            
+            workbook = xlsxwriter.Workbook('accuracy_single_marker.xlsx')
+            worksheet = workbook.add_worksheet()
+            
+            colours = ["Red", "Green", "Blue"]
+            shapes = ["Square", "Circle", "Triangle", "Cross"]
+            accuracy = ["TP", "FP", "Precision", "Recall", "F1 score"]
+            
+            worksheet.write(0, 0, frame_no)
+            
+            row = 2
+            cols = [1,6,11,16]
+            for i in range(4):
+                worksheet.write(0, cols[i], shapes[i])
+                
+                col = cols[i]
+                for j in range(5):
+                    worksheet.write(1, col+j , accuracy[j])
+                for n in range(3):
+                    worksheet.write(row+n, col , TPs[n,i])
+                    worksheet.write(row+n, col+1 , FPs[n,i])
+                    worksheet.write(row+n, col+2 , precision[n,i])
+                    worksheet.write(row+n, col+3 , recall[n,i])
+                    worksheet.write(row+n, col+4 , F1score[n,i])
 
-            mask_r, mask_g, mask_b = rgb_masking(frame_contour)
-                
+            row = 2
+            col = 0
+            for c in colours:
+                worksheet.write(row, col , c)
+                row += 1
             
             
             
             
-            contours_r, _ = cv.findContours(mask_r,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE)
-
-            # loop over the contours
-            for cnt in contours_r:
-                
-                area = cv.contourArea(cnt)
-                if area > 30 and area < 3000:
-                
-                    arc = cv.arcLength(cnt,True)
-                    epsilon = 0.02*arc
-                    approx = cv.approxPolyDP(cnt,epsilon,True)
-                    
-                    # rectangle marker
-                    if len(approx) == 4:
-                        rect = cv.minAreaRect(cnt)
-                        w, h = rect[1]
-                        if abs(w-h) <= 5:
-                            box = np.int0(cv.boxPoints(rect))
-                            cv.drawContours(frame_contour,[box],0,(255,0,0),2)
-        
-                            M = cv.moments(cnt)
-                            if M['m00'] != 0.0:
-                                cx = int(M["m10"] / M["m00"])
-                                cy = int(M["m01"] / M["m00"])
-                                cv.circle(frame_contour, (cx, cy), 3, (255, 0, 0), -1)
-                                
-                                centre_x.append(cx)
-                                centre_y.append(cy)
-                                detected += 1
-                                
-        
-                            cv.putText(frame_contour, "Rec", (cx, cy), cv.FONT_HERSHEY_SIMPLEX,
-                                   0.5, (255, 0, 0), 2)
+            # visualisation - colorise dpeth frame to colormap
+            colorizer = rs.colorizer()
+            colorizer.set_option(rs.option.color_scheme, 3); # white to black
+            colorizer.set_option(rs.option.min_distance, 0.3)
+            colorizer.set_option(rs.option.max_distance, 1.5)
             
-            contours_g, _ = cv.findContours(mask_g,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE)
-
-            # circle marker
-            for cnt in contours_g:
-                # Minimum Enclosing Circle
-                area = cv.contourArea(cnt)
-                if area > 30 and area < 3000:
-                    arc = cv.arcLength(cnt,True)
-                    epsilon = 0.02*arc
-                    approx = cv.approxPolyDP(cnt,epsilon,True)
-                    
-                    x, y, w, h = cv.boundingRect(approx)
-                    if abs(w-h)<=5 and len(approx) >= 8:
-        #                 (cx,cy),radius = cv.minEnclosingCircle(cnt)
-        #                 cx = int(cx)
-        #                 cy = int(cy)
-        #                 cv.circle(frame_contour,(cx, cy),int(radius),(0,255,0),2)
-        #                 
-        
-                        M = cv.moments(cnt)
-                        if M['m00'] != 0.0:
-                            cx = int(M['m10']/M['m00'])
-                            cy = int(M['m01']/M['m00'])
-                            
-                            centre_x.append(cx)
-                            centre_y.append(cy)
-                            detected += 1
-                            
-                            cv.rectangle(frame_contour, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                            cv.circle(frame_contour, (cx, cy), 3, (0, 255, 0), -1)
-                            cv.putText(frame_contour, "Circle", (cx, cy), cv.FONT_HERSHEY_SIMPLEX,
-                                0.5, (0, 255, 0), 2)
-                            
-            contours_b, _ = cv.findContours(mask_b,cv.RETR_EXTERNAL,cv.CHAIN_APPROX_SIMPLE)  
-            for cnt in contours_r:
-                
-                area = cv.contourArea(cnt)
-                if area > 30 and area < 3000:
-                
-                    arc = cv.arcLength(cnt,True)
-                    epsilon = 0.02*arc
-                    approx = cv.approxPolyDP(cnt,epsilon,True)
-                    # triangle marker
-                    if len(approx) == 3:
-                        rect = cv.minAreaRect(cnt)
-                        w, h = rect[1]
-                        if abs(w-h) <= 5:
-                            cv.drawContours(frame_contour,[cnt],0,(255,0,255),2)
-                            M = cv.moments(cnt)
-                            if M['m00'] != 0.0:
-                                cx = int(M["m10"] / M["m00"])
-                                cy = int(M["m01"] / M["m00"])
-                                
-                                centre_x.append(cx)
-                                centre_y.append(cy)
-                                detected += 1
-                                
-                                cv.circle(frame_contour, (cx, cy), 3, (255,0,255), -1)
-                            cv.putText(frame_contour, "Tri", (cx, cy), cv.FONT_HERSHEY_SIMPLEX,
-                            0.5, (255,0,255), 2)
-            
-            # post-processing
-            # visualisation
-        
-            
-            
-            if not centre_x or not centre_y:
-                pass
-            else:
-                max_d = 5
-                
-                mu_x = np.mean(centre_x)
-                mu_y = np.mean(centre_y)
-                
-                sd_x = np.std(centre_x)
-                sd_y = np.std(centre_y)
-                
-                print(mu_x, mu_y)
-                
-            no_outlier_x = []
-            no_outlier_y = []
-            for c in range(np.shape(centre_x)[0]):
-                if centre_x[c] > (mu_x-max_d*sd_x) and centre_x[c] < (mu_x+max_d*sd_x) and centre_y[c] > (mu_y-max_d*sd_y) and centre_y[c] < (mu_y+max_d*sd_y):    
-                    no_outlier_x.append(centre_x[c])
-                    no_outlier_y.append(centre_y[c])
-                
-                
-            if not no_outlier_x or not no_outlier_y:
-                print("no detection")
-            else:
-                
-                new_mu_x = np.mean(no_outlier_x)
-                new_mu_y = np.mean(no_outlier_y)
-                
-                # accuracy = 
-                
-                perc_detect = (frame_no*3-detected)/(frame_no*3)
-                
-                print(new_mu_x, new_mu_y)
-                print(frame_no, detected, perc_detect)
-                
-                
-                
-                # total_no_pixel = np.shape(color_image)[0]*np.shape(color_image)[1]
-                # print(np.sum(R>0.4))# count colored pixels 
-                # print(cv.countNonZero(mask_r_int))#find specific region
-                
-                file.write("\n\n frame no.: "+str(frame_no)+\
-                            "\n detected: "+str(detected)+\
-                            "   %detect: "+str(perc_detect)+\
-                            "\n centre_before:"+str([mu_x, mu_y])+\
-                            "\n centre_after: "+str([new_mu_x, new_mu_y]))#+\
-                            # "\n accuracy: "+str(accuracy))
-
-            
-            # colorise dpeth frame to colormap
-            depth_color_frame = rs.colorizer().colorize(depth_frame)
             # Convert frames to np.array
-            depth_color_image = np.asanyarray(depth_color_frame.get_data())
-            # scaled_depth_image = depth_color_image * self.depth_scale
+            global depth_color_image
+            depth_color_image = np.asanyarray(colorizer.colorize(depth_frame).get_data())
             
-            # plt.matshow(depth_color_image)
-            # plt.title('Using wait without for-loop accumulation')
-            # plt.savefig('op1.png')
+            # plt.colorbar(plt.matshow(depth_image*self.depth_scale, cmap = "gray_r"))
+            # plt.colorbar(plt.matshow(depth_color_image, cmap = "gray"))
+
             
-            
-            # color_image = np.asanyarray(color_frame.get_data())
-            # frame_contour = cv.cvtColor(frame_contour, cv.COLOR_BGR2RGB)
-            
-            
-            # get color intrinsic parameters
-            self.color_intrin = color_frame.profile.as_video_stream_profile().intrinsics
-            
-             #fps
+            #fps
             fps = cv.getTickFrequency()/(cv.getTickCount()-timer)
-            cv.putText(frame_contour, 'FPS: ' + str(int(fps)), (75, 50), cv.FONT_HERSHEY_SIMPLEX, 0.5,(0, 0, 255), 1)
+            cv.putText(color_copy, 'FPS: ' + str(int(fps)), (75, 50), cv.FONT_HERSHEY_SIMPLEX, 0.5,(0, 0, 255), 1)
             
             
-            # plt.matshow(frame_contour)
-            frame_contour = cv.cvtColor(frame_contour, cv.COLOR_RGB2BGR)            
-            images = np.hstack((frame_contour, depth_color_image))
+            
+            color_copy = cv.cvtColor(color_copy, cv.COLOR_RGB2BGR)            
+            images = np.hstack((color_copy, depth_color_image))
             
             # show images in opencv window
             show_image(images)
-            
-            
-            
-            
-            
+
             if cv.waitKey(1) & 0xFF == ord('q'):
                 cv.destroyAllWindows()
-                file.close()
+                # file.close()
+                workbook.close()
                 break
-            
-            
-            
 
 
 
 
 
-
-
-
-
-
+# =============================================================================
+# Functions definition
+# =============================================================================
 # load example ROS bag  
 def default_bag_input():
     #Get the current working directory
     cwd = os.getcwd()
     cwd = cwd.replace(os.sep,"/")
-    inputbag = cwd + "/bags/pre_session_cali_1270_720_edge.bag"
+    # inputbag = cwd + "/bags/pre_session_cali_1270_720_surface.bag"
+    inputbag = "C:/Users/yuijo/OneDrive - Imperial College London/21-22/MSc Project/realsense/final data acquisition/markers/distances/single_marker_on_d0.bag"
     
     return inputbag
 
@@ -518,9 +492,21 @@ def rescale_image_by_ratio(image,rescale_percentage=0.5):
     resized_image = cv.resize(image, resize_dim)
     
     return resized_image
-        
+
+
+# initial roi
+def initialise_roi( x1, y1, w, h):
+    roi = [x1, y1, w, h]
+
+    return roi
+
+
+# set a new roi
+def set_new_roi():
+    pass        
  
-### Show images
+    
+# Show images
 def show_image(image,rescale_percentage=0.5):
     if image.shape[1] > 1280 or image.shape[0] > 720:
         image = rescale_image_by_ratio(image,rescale_percentage)
@@ -529,7 +515,7 @@ def show_image(image,rescale_percentage=0.5):
     cv.imshow("Stream", image)
             
 
-### IN PROGRESS
+### -----Preset and post processing-----
 # Preset options setting: only available for real-time streaming
 def preset_options(device):
     depth_sensor = device.query_sensors()[0]
@@ -568,98 +554,44 @@ def preset_options(device):
     print(advnc_mode.get_depth_table())
 
 
-### IN PROGRESS
 # Post processing filtering
 def post_processing(depth_frame):
     spat_filter = rs.spatial_filter()       # Spatial    - edge-preserving spatial smoothing
-    temp_filter = rs.temporal_filter()      # Temporal   - reduces temporal noise
+    # temp_filter = rs.temporal_filter()      # Temporal   - reduces temporal noise
     hole_fill = rs.hole_filling_filter()    # Hole-filling filter
     
     filtered = spat_filter.process(depth_frame)
-    filtered = temp_filter.process(filtered)
+    # filtered = temp_filter.process(filtered)
     depth_frame_filtered = hole_fill.process(filtered)
 
+    return depth_frame_filtered
 
-# RGB histogram plotting
-def rgb_histogram(channels):
-    
-    channel_count = np.shape(channels)[0]
-    titles = "nR", "nG", "nB"
-    colour = "r", "g", "b"
-    bin_edges = np.linspace(0, 1, 101)
-    barw = bin_edges[1]-bin_edges[0]
-    
-    plt.figure(figsize=(12,4))
-    for c in range(channel_count):
-        plt.subplot(2,channel_count,c+1)
-        plt.imshow(channels[c], cmap='gray')
-        plt.title('%s'%titles[c])
-    
-        hist_nRGB, _ =  np.histogram(channels[c], bins=bin_edges)
+### -----Color detection and filtering-----
 
-        plt.subplot(2,channel_count,c+4)
-        plt.bar(bin_edges[:-1], hist_nRGB, width=barw, align='edge', color=colour[c])     
-        plt.title('Histogram of %s'%titles[c])
+# import as a seperate class from ColorDetect.py
 
 
-### IN PROGRESS
-# rgb masking
-def rgb_masking(color_image):
-    # rgb channels
-    R, G, B = cv.split(color_image)
+### -----Contour detection-----
 
-    # convert to floating point
-    fR = np.asarray(R, dtype=float)
-    fG = np.asarray(G, dtype=float)
-    fB = np.asarray(B, dtype=float)
-    
-    #normalised 
-    my_eps = 0.001 # Avoids divide by zero
-    denominator = (fR+fG+fB+my_eps)
-    nR = fR/denominator
-    nG = fG/denominator
-    nB = fB/denominator
-    # plot histogram
-    # rgb_histogram([nR, nG, nB])
-   
-
-    # binary images with threshold
-    mask_r = nR > 0.39 # 0.4
-    mask_g = nG > 0.41 # 0.4
-    mask_b = nB > 0.35 # 0.37
-
-    plt.figure(figsize=(12,3))
-    plt.subplot(1,3,1)
-    plt.imshow(255*mask_r, interpolation=None) #'none'
-    plt.subplot(1,3,2)
-    plt.imshow(255*mask_g, interpolation=None)
-    plt.subplot(1,3,3)
-    plt.imshow(255*mask_b, interpolation=None)
-    
-    # convert to uint8 format
-    mask_r_int = mask_r.astype(np.uint8)*255
-    mask_g_int = mask_g.astype(np.uint8)*255
-    mask_b_int = mask_b.astype(np.uint8)*255
-    
-   
-    return mask_r_int, mask_g_int, mask_b_int
+# import as a seperate module from ContourDetect.py
 
 
 # Morphological transformation
-def morpho_trans(frame):
+def morpho_trans(frame, kernalsize=(9,9)):
 
     # canny edge detector
-    dst_canny = cv.Canny(frame, 50, 150)
+    # dst_canny = cv.Canny(frame, 50, 150)
     
     # erosion/dilation,
     # kernel = np.ones((9, 9), np.uint8)
-    kernel = cv.getStructuringElement(cv.MORPH_RECT, (4, 4))
+    kernel = cv.getStructuringElement(cv.MORPH_RECT, kernalsize)
     dst_ero = cv.erode(frame, kernel, iterations=1)
     dst_dil = cv.dilate(frame, kernel, iterations=1)
 
     # open(e+d)/close(d+e)
     dst_open = cv.morphologyEx(frame, cv.MORPH_OPEN, kernel, iterations=2)
     dst_close = cv.morphologyEx(frame, cv.MORPH_CLOSE, kernel, iterations=2)
+    
 
     # morphological gradient (ori-e)
     dst_gradient = cv.morphologyEx(frame, cv.MORPH_GRADIENT, kernel, iterations=1)
@@ -667,21 +599,89 @@ def morpho_trans(frame):
     dst_tophat = cv.morphologyEx(frame, cv.MORPH_TOPHAT, kernel, iterations=1)
     dst_blackhat = cv.morphologyEx(frame, cv.MORPH_BLACKHAT, kernel, iterations=1)
     
-    return dst_canny, dst_ero, dst_close
+    return  dst_dil
 
 
-### IN PROGRESS
-# Tracking box
-def drawing_tracking_box(image):
-    pass
+### ---- 2D Pixels to 3D Points -----
+def get_depth_and_point(depth_frame, dataset, color_intrin):
+    
+    
+    dataset = np.array(dataset).T.astype(int)
+    print(dataset)
+    
+    depth_points = []
+    
+    for [x,y] in dataset:
+        depth = depth_frame.get_distance(x, y) # depth data from depth frame
+        depth_point = rs.rs2_deproject_pixel_to_point(color_intrin, (x, y), depth)
+        depth_points.append(depth_point)
+        # range2point = math.sqrt(((color_point[0])**2) + ((color_point[1])**2) + ((color_point[2])**2))
+        
+        # print('| 2D '+ str(x) + ',' + str(y) + ' --> 3D ' + str(depth_point))
+        
+    return np.mean(depth_points, axis=0)    
 
 
-## IN PROGRESS
-# accuracy test
-def accuracy_tests():
-    pass
+### -----Outliler removal ----          
+# remove outlier for centre points determining
+def remove_outlier(dataset):
+    
+    if type(dataset)=='numpy.ndarray':
+        pass
+    else:
+        dataset = np.array(dataset)
+    
+    
+    x, x_out = calculate_IQR(dataset[:,0])
+    y, y_out = calculate_IQR(dataset[:,1])
+    s, s_out = calculate_IQR(dataset[:,2])
+
+    x_new = []
+    y_new = []
+    s_new = []
+    
+    for xi, yi, si in zip(x, y, s):
+        valid_x = all([xi != x_o for x_o in x_out])
+        valid_y = all([yi != y_o for y_o in y_out])
+        valid_s = all([si != s_o for s_o in s_out])
+        
+        if valid_x and valid_y and valid_s:
+            x_new.append(xi)
+            y_new.append(yi)
+            s_new.append(si)
+    
+    offset_no = len(x)-len(x_new)
+    
+    return x_new, y_new, s_new, offset_no
 
 
+# Percentiles calculation
+def calculate_IQR(data):
+    Q1 = np.percentile(data, 25)
+    Q3 = np.percentile(data, 75)
+    
+    IQR = (Q3-Q1)*1.5
+    
+    lb = Q1 - IQR
+    ub = Q3 + IQR
+    
+    data_IQR = []
+    outliers = []
+    
+    for d in data:
+        if d >= lb and d <= ub:
+            data_IQR.append(d)
+        else:
+            outliers.append(d)
+    
+    return data_IQR, outliers
+
+
+
+
+# =============================================================================
+# Main code
+# =============================================================================
 if __name__ == '__main__':
     ### TO DO
     # check versions
@@ -727,4 +727,10 @@ if __name__ == '__main__':
         ROSBagFile(inputfile).get_frame()
     
     
+
+
+
+
+
+
 
