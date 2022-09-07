@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+
 import numpy as np
 import cv2 as cv
 from matplotlib import pyplot as plt
@@ -9,29 +10,31 @@ import math
 
 # convert 32sC1 images to 8UC1 images for cv.
 def convert_to_uint8(img):
-    if np.shape(img)[2] > 1:
-        gray_img = cv.cvtColor(img, cv.COLOR_RGB2GRAY)
+    if np.shape(img)[2] > 1: # float64
+        gray_img = img.astype(np.uint8)
+        gray_img = cv.cvtColor(gray_img, cv.COLOR_HSV2BGR)
+        gray_img = cv.cvtColor(gray_img, cv.COLOR_BGR2GRAY)
     else:
         pass
     
     return gray_img
 
-
 # find contour based on colour masking
 def find_contour(mask, img, marker_size):
     
     ppm = None
+
     
-    cp_tri, cp_squ, cp_cro, detection, FP = detect_polygon(img, mask, marker_size)
-    cp_cir, det_cir, fp_cir, ppm = detect_circle(img, mask, marker_size, ppm)   
+    cp_tri, cp_squ, cp_cro, detection, missing = detect_polygon(img, mask, marker_size)
+    cp_cir, det_cir, miss_cir, ppm = detect_circle(img, mask, marker_size, ppm)   
     
 
     detection.insert(1, det_cir)
-    FP.insert(1, fp_cir)
-
-    # plt.imshow(img)
-     
-    return  cp_squ, cp_cir, cp_tri, cp_cro, detection, FP
+    missing = np.insert(missing, 1, miss_cir)
+    
+    
+    
+    return  cp_squ, cp_cir, cp_tri, cp_cro, detection, missing, ppm
 
 
 # detect squares, triangles, and cross
@@ -47,10 +50,10 @@ def detect_polygon(img, mask, marker_size):
     # det_cir = 0
     det_cro = 0
     
-    fp_tri = 0
-    fp_squ = 0
-    # fp_cir = 0
-    fp_cro = 0
+    miss_tri = 0
+    miss_squ = 0
+    # miss_cir = 0
+    miss_cro = 0
     
     cnts = cv.findContours(mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)
     cnts = cnts[0] if len(cnts) == 2 else cnts[1]
@@ -95,7 +98,6 @@ def detect_polygon(img, mask, marker_size):
                 sides = [a,b,c]
 
                 if any([abs(sides[i-1]-sides[i])>5 for i in range(3)]):
-                    fp_tri += 1
                     pass
                 
                 else:
@@ -122,15 +124,13 @@ def detect_polygon(img, mask, marker_size):
                 d_h = np.linalg.norm((box[1]+box[0])/2-(box[2]+box[3])/2)
    
                 if abs(d_w-d_h) > 5:
-                    fp_squ += 1
-                    
                     pass
                 else:
                     s = np.mean([d_w, d_h])
                     
                     # pixels per metric (mm)
-                    # ppm = d_w/marker_size, d_h/marker_size
-                    # print("squ: ", ppm)
+                    ppm = d_w/marker_size, d_h/marker_size
+                    print("squ: ", ppm)
                     
                     cp_squ.append([cx, cy, s])
                     
@@ -159,9 +159,8 @@ def detect_polygon(img, mask, marker_size):
             
             
             # cross
-            elif len(approx) >= 12:
+            elif len(approx) > 8:
                 if abs(w-h)>5:
-                    fp_cro += 1
                     pass
                 
                 else:
@@ -187,9 +186,14 @@ def detect_polygon(img, mask, marker_size):
     
     # detection = [det_squ, det_cir, det_tri, det_cro]
     detection = [det_squ, det_tri, det_cro]
-    FP = [fp_squ, fp_tri ,fp_cro]
     
-    return cp_tri, cp_squ, cp_cro, detection, FP
+    missing = np.zeros(3)
+    for d in range(3):
+        if detection[d] == 0:
+            missing[d] = 1
+    
+    
+    return cp_tri, cp_squ, cp_cro, detection, missing
 
 
 # Hough circle detection
@@ -199,17 +203,18 @@ def detect_circle(img, mask, marker_size, ppm):
                               dp=1.5,                       # Inverse ratio of the accumulator resolution to the image resolution
                               minDist=10,
                               param1=300,                   # higher threshold passing to canny edge detector
-                              param2=0.6,
+                              param2=0.7,
                               minRadius=10,
                               maxRadius=100)
     
     cp_cir = []
     
     det_cir = 0
-    fp_cir = 0
+    miss_cir = 0
 
     
     if circles is None:
+        miss_cir = 1
         pass
         
     else:
@@ -218,7 +223,7 @@ def detect_circle(img, mask, marker_size, ppm):
        
         if circles.ndim == 2:
             cx, cy, r = circles[:,0], circles[:,1], circles[:,2]
-            cx_new, cy_new, r_new, fp_cir = remove_outlier(circles)
+            cx_new, cy_new, r_new = remove_outlier(circles)
             
             cx = np.mean(cx_new)
             cy = np.mean(cy_new)
@@ -235,13 +240,14 @@ def detect_circle(img, mask, marker_size, ppm):
         cy = int(cy)
         r = int(r)
         
-        cp_cir.append([cx, cy, 2*r])
+        cp_cir.append([cx, cy, r*2])
+        
 
         cv.circle(img, (cx, cy), r, (0,255,0),2)
         cv.circle(img, (cx, cy), 2, (0,255,0),3)
         cv.putText(img, "Cir", (cx, cy), cv.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
         
-    return cp_cir, det_cir, fp_cir, ppm
+    return cp_cir, det_cir, miss_cir, ppm
 
 
 # remove outlier for multiple detection for a single shape
@@ -271,9 +277,9 @@ def remove_outlier(dataset):
             y_new.append(yi)
             s_new.append(si)
 
-    fp_cir = len(x)-len(x_new)
+    
            
-    return x_new, y_new, s_new, fp_cir
+    return x_new, y_new, s_new
 
 
 # Percentiles calculation

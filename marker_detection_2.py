@@ -23,7 +23,7 @@ import ContourDetect
 
 cd = ColorDetect.ColorDetect()
 
-
+import time
 
 # =============================================================================
 # Class definition
@@ -177,8 +177,6 @@ class ROSBagFile:
         pipeline_profile = self.pipeline.start(config)
         device = pipeline_profile.get_device()
         
-        
-        
         # depth scale "depth unit" 
         #  - translates pixels to meters: 0.0001 metre
         depth_sensor = pipeline_profile.get_device().first_depth_sensor()
@@ -191,10 +189,10 @@ class ROSBagFile:
 
         playback = device.as_playback()
         playback.set_real_time(False)
+        
+        
 
     def get_frame(self):
-        
-        
         # create an aign object
         # CHECK DEPTH2COLOR or COLOR2DEPTH
         align_to = rs.stream.color
@@ -203,57 +201,88 @@ class ROSBagFile:
         # skip the first few frames
         for _ in range(10):
             self.pipeline.wait_for_frames()
-           
+            
+            
+
+        # capture a sequence with 60 frames
+        frame_length = 60
+        queue = rs.frame_queue(frame_length)
+        
+        
+        for i in range(frame_length):
+            
+            # get frame from pipeline
+            frames = self.pipeline.wait_for_frames()
+            frame_number = frames.frame_number
+            
+            frames.keep()
+            queue.enqueue(frames)
+            
+            aligned_frames = align.process(frames)
+            
+        self.pipeline.stop() 
+        
+        
+
+        # initialisation of some vvariables
         marker_size = 40 # 40mm
     
         H = 720 # 720
         W = 1280 # 1280
         
-        
-        x1 = int(np.round(0.25*W))
+        x1 = int(np.round(0.3*W))
         y1 = int(np.round(0.15*H))
-        w = 768
-        h = 504
+        w = int(np.round(0.4*W))
+        h = int(np.round(0.5*H))
         roi = initialise_roi(x1, y1, w, h)
         
         [x1, y1, w, h] = roi
         
         
-        squ_r, cir_r, tri_r, cro_r = [],[],[],[]
-        squ_g, cir_g, tri_g, cro_g = [],[],[],[]
-        squ_b, cir_b, tri_b, cro_b = [],[],[],[]
-        
         
         frame_no = 0
         
-        TPs = np.zeros((3,4)).astype(int)
-        FPs = np.zeros((3,4)).astype(int)
+        detections = np.zeros((3,4)).tolist()
+        missings = np.zeros((3,4)).tolist()
+        colour_correct = np.zeros((3,4)).tolist()
+        colour_error = np.zeros((3,4)).tolist()
+        shape_correct = np.zeros((3,4)).tolist()
+        shape_error = np.zeros((3,4)).tolist()
         
+        depth_r_squ = []
+        depth_r_cir = []
+        depth_r_tri = []
+        depth_r_cro = []
         
+        depth_g_squ = []
+        depth_g_cir = []
+        depth_g_tri = []
+        depth_g_cro = []
         
-        cv.namedWindow("Stream", cv.WINDOW_AUTOSIZE)
+        depth_b_squ = []
+        depth_b_cir = []
+        depth_b_tri = []
+        depth_b_cro = []
+
+
+                
+        file = open("colour_shape_data.txt","w")
         
-        file = open("accuracy_data_bag.txt","w")
-        
-        while True:
+        # 
+        for i in range(frame_length):
             timer = cv.getTickCount()
             
-            # for-loop for frame sampling accumulation 
-            # frame_count = 5
-            # frameset_depth = np.zeros(())
-            
-            # get frameset
-            frames = self.pipeline.wait_for_frames()
-            frame_no += 1
-            print("frame: ",frame_no)
-            
-            # align depth and color frames
-            aligned_frames = align.process(frames)
-            color_frame = aligned_frames.get_color_frame()
-            depth_frame = aligned_frames.get_depth_frame()
+            frames = queue.wait_for_frame()
+            frame_no = frames.frame_number
+            print("frame: ", i+1)
+        
+            # color_frame = frames.as_frameset().get_color_frame()
+            color_frame = aligned_frames.as_frameset().get_color_frame()
+            depth_frame = aligned_frames.as_frameset().get_depth_frame()
+
 
             self.depth_frame = depth_frame
-
+            
             # get intrinsic and extrinsic parameters
             self.color_intrin = color_frame.profile.as_video_stream_profile().intrinsics
             self.depth_intrin = depth_frame.profile.as_video_stream_profile().intrinsics
@@ -261,179 +290,144 @@ class ROSBagFile:
             depth_to_color_extrin = depth_frame.profile.get_extrinsics_to(color_frame.profile)
             color_to_depth_extrin = color_frame.profile.get_extrinsics_to(depth_frame.profile)
             
-            
+
+
             global color_image, depth_image
             color_image = np.asanyarray(color_frame.get_data())
             depth_image = np.asanyarray(depth_frame.get_data())
-            
-            
             
             ## colour image processing
             color_copy = color_image.copy()
             
             # resize roi image
             resize_color = color_copy[y1:y1+h, x1:x1+w, :]
-            plt.matshow(resize_color)
             
-            # rgb 3d scatter plot
-            filtered_points, points_idx = cd.rgb_scatter_plotting(resize_color,stepsize=1)
+            # GaussianBlur
+            resize_color = cv.GaussianBlur(resize_color,(11,11),0)
+            plt.figure(figsize=(8, 6), dpi=80)
+            plt.imshow(resize_color)
+            plt.axis("off")
+            
+            # rgb histogram of roi
+            # cd.rgb_histogram(resize_color)
+            
+            
+            # manual rgb masks
+            # img_rgb = cd.rgb_masking(resize_color)
+            # cd.scatter_2d(resize_color,stepsize=100)
+            
+            # manual hsv masks
+            img_hsv, mask_r, mask_g, mask_b = cd.hsv_masking(resize_color)
+            cd.scatter_2d(img_hsv,stepsize=1)
+            
             
             # rgb clustering and masking
-            cluster_r, cluster_g, cluster_b, idx_r, idx_g, idx_b = cd.rgb_kmeans(filtered_points,points_idx, k=3)
-            # rgb_GMM(color_copy, n_components=10, p_thershold=0.95)
+            img_hsv_2 = img_hsv.copy()
+            img_hsv_2 = cv.cvtColor(img_hsv_2, cv.COLOR_BGR2HSV_FULL)
             
-            # hsv scatter
-            # filtered_points = cd.hsv_scatter_potting(resize_color,stepsize=100)
-            # cd.hsv_kmeans(filtered_points, k=3)
+
+            flatten_data = img_hsv_2.reshape((-1,3))
+            flatten_data_idx = np.array(np.where((flatten_data[:,0]!=0) & (flatten_data[:,1]!=0) & (flatten_data[:,2]!=0))).flatten()
+            flatten_data = flatten_data[(flatten_data[:,0]!=0) & (flatten_data[:,1]!=0) & (flatten_data[:,2]!=0)]
+            
+            # clustering three channels
+            
+            # # cd.rgb_kmeans(np.array(data),3)
+            # # cd.rgb_GMM(np.array(data),3)
+            cluster_r, cluster_g, cluster_b, idx_r, idx_g, idx_b, centroids = cd.rgb_DBSCAN(np.array(flatten_data), flatten_data_idx, 3)
             
             
+            # convert colour values back to pixel coordinates for masks
+            mask_r = cd.get_mask(color_copy, roi, cluster_r, idx_r)
+            mask_g = cd.get_mask(color_copy, roi, cluster_g, idx_g)
+            mask_b = cd.get_mask(color_copy, roi, cluster_b, idx_b)
             
-            mask_r = cd.seperate_rgb_masks(H, W, resize_color, roi, cluster_r, idx_r)
-            mask_g = cd.seperate_rgb_masks(H, W, resize_color, roi, cluster_g, idx_g)
-            mask_b = cd.seperate_rgb_masks(H, W, resize_color, roi, cluster_b, idx_b)
-            # plt.matshow(mask_r)
-            # plt.matshow(mask_g)
-            # plt.matshow(mask_b)
-           
             
-            # find contour
+            # # find contour
             mask_r = ContourDetect.convert_to_uint8(mask_r)
             mask_g = ContourDetect.convert_to_uint8(mask_g)
             mask_b = ContourDetect.convert_to_uint8(mask_b)
             
-            cp_squ_r, cp_cir_r, cp_tri_r, cp_cro_r, detect_r, FP_r = ContourDetect.find_contour(mask_r, color_copy, marker_size)
-            cp_squ_g, cp_cir_g, cp_tri_g, cp_cro_g, detect_g, FP_g = ContourDetect.find_contour(mask_g, color_copy, marker_size)
-            cp_squ_b, cp_cir_b, cp_tri_b, cp_cro_b, detect_b, FP_b = ContourDetect.find_contour(mask_b, color_copy, marker_size)
-
+            
+            cp_squ_r, cp_cir_r, cp_tri_r, cp_cro_r, detection_r, missing_r, ppm_r = ContourDetect.find_contour(mask_r, color_copy, marker_size)
+            cp_squ_g, cp_cir_g, cp_tri_g, cp_cro_g, detection_g, missing_g, ppm_g = ContourDetect.find_contour(mask_g, color_copy, marker_size)
+            cp_squ_b, cp_cir_b, cp_tri_b, cp_cro_b, detection_b, missing_b, ppm_b = ContourDetect.find_contour(mask_b, color_copy, marker_size)
+            
+            print(ppm_r,ppm_g,ppm_b)
             # plt.matshow(color_copy)
             
-            if cp_squ_r:
-                squ_r.extend(cp_squ_r)
-            if cp_cir_r:
-                cir_r.extend(cp_cir_r)
-            if cp_tri_r:
-                tri_r.extend(cp_tri_r)
-            if cp_cro_r:
-                cro_r.extend(cp_cro_r)
+            detection_new = [detection_r, detection_g, detection_b]
+            detections = np.array(detections)+detection_new
             
-            if cp_squ_g:
-                squ_g.extend(cp_squ_g)
-            if cp_cir_g:
-                cir_g.extend(cp_cir_g)
-            if cp_tri_g:
-                tri_g.extend(cp_tri_g)
-            if cp_cro_g:
-                cro_g.extend(cp_cro_g)
+            missing_new = [missing_r, missing_g, missing_b]
+            missings = np.array(missings)+missing_new
+            
+            # print(detections)
+            # print(missings)
+            
+            
+            ## Detection accuracy check
+            color_copy_hsv = color_image.copy()
+            color_copy_hsv = cv.cvtColor(color_copy_hsv, cv.COLOR_BGR2HSV_FULL)     
+            
+            shape_r = np.array([cp_squ_r, cp_cir_r, cp_tri_r, cp_cro_r], dtype=object)
+            shape_g = np.array([cp_squ_g, cp_cir_g, cp_tri_g, cp_cro_g], dtype=object)
+            shape_b = np.array([cp_squ_b, cp_cir_b, cp_tri_b, cp_cro_b], dtype=object)
+            
+            shapes = [shape_r, shape_g, shape_b]
+            
+            
+            # check colour and shape
+            colour_correct_new = np.zeros((3,4))
+            colour_error_new = np.zeros((3,4))
+            px_percentage = np.zeros((3,4))
+            
+            for c in range(3):
+                for sh in range(4):
+                    if shapes[c][sh]is None:
+                        pass
+                    else:
+                        colour_error_new[c,sh], px_percentage[c,sh] = check_colour_shape(color_copy_hsv, shapes[c][sh], centroids, c, 100)
+                    
+                        # if px_percentage[c,sh]
+                        
+            colour_correct_new =  detection_new-colour_error_new
+            
+            colour_correct = np.array(colour_correct)+colour_correct_new
+            colour_error = np.array(colour_error)+colour_error_new
+            
+            
+            # print(px_percentage)
                 
-            if cp_squ_b:
-                squ_r.extend(cp_squ_b)
-            if cp_cir_b:
-                cir_r.extend(cp_cir_b)
-            if cp_tri_b:
-                tri_r.extend(cp_tri_b)
-            if cp_cro_b:
-                cro_r.extend(cp_cro_b)
             
-            # # detect "offset"
-            # cx_squ_r, cy_squ_r, s_squ_r, offset_no_squ_r = remove_outlier(squ_r)
-            # remove_outlier(cir_r)
-            # remove_outlier(tri_r)
-            # remove_outlier(squ_r)
+            ## depth image processing
             
             
-            # ## depth image processing
-            # depth_point = get_depth_and_point(self.depth_frame, [cx_squ_r, cy_squ_r], self.color_intrin)
-            # print(depth_point)
+            # for c in range(3):
+            #     for sh in range(4):
+            #         if shapes[c][sh]is None:
+            #             pass
+            #         else:
+            #             depth_points = get_depth_and_point(self.depth_frame, shapes[c][sh], self.color_intrin)
+            #             print(depth_points)
+                        
+             
+            depth_r_squ += [get_depth_and_point(self.depth_frame, shapes[0][0], self.color_intrin)]
+            depth_r_cir += [get_depth_and_point(self.depth_frame, shapes[0][1], self.color_intrin)]
+            depth_r_tri += [get_depth_and_point(self.depth_frame, shapes[0][2], self.color_intrin)]
+            depth_r_cro += [get_depth_and_point(self.depth_frame, shapes[0][3], self.color_intrin)]
+             
+            depth_g_squ += [get_depth_and_point(self.depth_frame, shapes[1][0], self.color_intrin)]
+            depth_g_cir += [get_depth_and_point(self.depth_frame, shapes[1][1], self.color_intrin)]
+            depth_g_tri += [get_depth_and_point(self.depth_frame, shapes[1][2], self.color_intrin)]
+            depth_g_cro += [get_depth_and_point(self.depth_frame, shapes[1][3], self.color_intrin)]
             
-            #ppm
+            depth_b_squ += [get_depth_and_point(self.depth_frame, shapes[2][0], self.color_intrin)]
+            depth_b_cir += [get_depth_and_point(self.depth_frame, shapes[2][1], self.color_intrin)]
+            depth_b_tri += [get_depth_and_point(self.depth_frame, shapes[2][2], self.color_intrin)]
+            depth_b_cro += [get_depth_and_point(self.depth_frame, shapes[2][3], self.color_intrin)]
             
-            #IoU
-            
-            
-            ## Accuracy 
-            # True positive
-            new_detection = np.array([detect_r, detect_g, detect_b])
-            TPs = TPs + new_detection
-            
-            # False positive
-            new_FP = np.array([FP_r, FP_g, FP_b])
-            FPs = FPs + new_FP
-            # print(FPs)
-                
-            # False negative
-            FNs = (np.ones((3,4)).astype(int))*frame_no-TPs
-            
-            #True negative
-            TNs = np.zeros((3,4)).astype(int)
-            
-            
-            # output accuracy
-            
-            np.seterr(invalid='ignore')
-            
-            precision = TPs/(TPs+FPs)
-            recall = TPs/(TPs+FNs)
-            F1score = (precision*recall)/((precision+recall)/2)
-            
-            precision[np.isnan(precision)] = 0
-            recall[np.isnan(recall)] = 0
-            F1score[np.isnan(F1score)] = 0
-            
-            
-            
-            
-            # morpho
-            # dst_dil = morpho_trans(depth_image, (9,9))
-            # plt.matshow(dst_dil, cmap = 'gray')
-   
-            # reset roi (AFTER THE DETECTION)
-            
-            
-            
-            
-            
-            
-            # write into file
-            # file.write("\n\n frame no.: "+str(frame_no)+\
-            #             "\n detected: "+str(new_detect)+\
-            #             "   %detect: "+str(perc_detect)+\
-            #             "\n centre estimation:"+str([mu_x, mu_y])+\
-            #             "\n 3D point: "+str(mu_3d))#+\
-            #             # "\n accuracy: "+str(accuracy))
-            
-            workbook = xlsxwriter.Workbook('accuracy_single_marker.xlsx')
-            worksheet = workbook.add_worksheet()
-            
-            colours = ["Red", "Green", "Blue"]
-            shapes = ["Square", "Circle", "Triangle", "Cross"]
-            accuracy = ["TP", "FP", "Precision", "Recall", "F1 score"]
-            
-            worksheet.write(0, 0, frame_no)
-            
-            row = 2
-            cols = [1,6,11,16]
-            for i in range(4):
-                worksheet.write(0, cols[i], shapes[i])
-                
-                col = cols[i]
-                for j in range(5):
-                    worksheet.write(1, col+j , accuracy[j])
-                for n in range(3):
-                    worksheet.write(row+n, col , TPs[n,i])
-                    worksheet.write(row+n, col+1 , FPs[n,i])
-                    worksheet.write(row+n, col+2 , precision[n,i])
-                    worksheet.write(row+n, col+3 , recall[n,i])
-                    worksheet.write(row+n, col+4 , F1score[n,i])
 
-            row = 2
-            col = 0
-            for c in colours:
-                worksheet.write(row, col , c)
-                row += 1
-            
-            
-            
-            
             # visualisation - colorise dpeth frame to colormap
             colorizer = rs.colorizer()
             colorizer.set_option(rs.option.color_scheme, 3); # white to black
@@ -448,10 +442,25 @@ class ROSBagFile:
             # plt.colorbar(plt.matshow(depth_color_image, cmap = "gray"))
 
             
+
+
+            # write into file
+
+            file.write("\n\n frame no.: "+str(frame_no)+\
+                        "\n detections: "+str(detections)+\
+                        "\n missing: "+str(missings)+\
+                        "\n colour correct: "+str(colour_correct)+\
+                        "\n colour_error: "+str(colour_error)+\
+                        "\n pixel percentage: "+str(px_percentage)
+                        
+                        )
+                
+
             #fps
             fps = cv.getTickFrequency()/(cv.getTickCount()-timer)
-            cv.putText(color_copy, 'FPS: ' + str(int(fps)), (75, 50), cv.FONT_HERSHEY_SIMPLEX, 0.5,(0, 0, 255), 1)
-            
+            cv.rectangle(color_copy, (60, 30), (160,80), (255,255,255), -1)
+            # cv.putText(color_copy, 'FPS: ' + str(int(fps)), (75, 50), cv.FONT_HERSHEY_SIMPLEX, 0.5,(0, 0, 255), 1)
+            cv.putText(color_copy, str(frame_no)+' ('+str(i+1)+')', (75, 70), cv.FONT_HERSHEY_SIMPLEX, 0.5 , (0,0,0), 1)
             
             
             color_copy = cv.cvtColor(color_copy, cv.COLOR_RGB2BGR)            
@@ -459,14 +468,47 @@ class ROSBagFile:
             
             # show images in opencv window
             show_image(images)
-
+            
+            
+            time.sleep(1)
+            
             if cv.waitKey(1) & 0xFF == ord('q'):
                 cv.destroyAllWindows()
-                # file.close()
-                workbook.close()
+                file.close()
                 break
+        
+       
+        n_offset = np.zeros((3,4))
+        
+        z_r_squ, n_offset[0,0] = remove_outlier(depth_r_squ)
+        z_r_cir, n_offset[0,1] = remove_outlier(depth_r_cir)
+        z_r_tri, n_offset[0,2] = remove_outlier(depth_r_tri)
+        z_r_cro, n_offset[0,3] = remove_outlier(depth_r_cro)
+        
+        z_g_squ, n_offset[1,0] = remove_outlier(depth_g_squ)
+        z_g_cir, n_offset[1,1] = remove_outlier(depth_g_cir)
+        z_g_tri, n_offset[1,2] = remove_outlier(depth_g_tri)
+        z_g_cro, n_offset[1,3] = remove_outlier(depth_g_cro)
+        
+        z_b_squ, n_offset[2,0] = remove_outlier(depth_b_squ)
+        z_b_cir, n_offset[2,1] = remove_outlier(depth_b_cir)
+        z_b_tri, n_offset[2,2] = remove_outlier(depth_b_tri)
+        z_b_cro, n_offset[2,3] = remove_outlier(depth_b_cro)
+            
+        points_3d = [z_r_squ, z_r_cir, z_r_tri, z_r_cro,
+                     z_g_squ, z_g_cir, z_g_tri, z_g_cro,
+                     z_b_squ, z_b_cir, z_b_tri, z_b_cro,]
+        
 
-
+        print(n_offset)
+        print(points_3d)
+        
+            
+        if cv.waitKey(1) & 0xFF == ord('q'):
+            cv.destroyAllWindows()
+            file.close()
+            # workbook.close()
+ 
 
 
 
@@ -604,21 +646,18 @@ def morpho_trans(frame, kernalsize=(9,9)):
 
 ### ---- 2D Pixels to 3D Points -----
 def get_depth_and_point(depth_frame, dataset, color_intrin):
-    
-    
-    dataset = np.array(dataset).T.astype(int)
-    print(dataset)
+    dataset = np.array(dataset).astype(int)
     
     depth_points = []
     
-    for [x,y] in dataset:
+    for [x,y,_] in dataset:
         depth = depth_frame.get_distance(x, y) # depth data from depth frame
         depth_point = rs.rs2_deproject_pixel_to_point(color_intrin, (x, y), depth)
         depth_points.append(depth_point)
         # range2point = math.sqrt(((color_point[0])**2) + ((color_point[1])**2) + ((color_point[2])**2))
         
         # print('| 2D '+ str(x) + ',' + str(y) + ' --> 3D ' + str(depth_point))
-        
+    
     return np.mean(depth_points, axis=0)    
 
 
@@ -631,28 +670,32 @@ def remove_outlier(dataset):
     else:
         dataset = np.array(dataset)
     
+    if np.isnan(dataset).all():
+        xyz_new, offset_no = [], 0
+    else: 
+        x, x_out = calculate_IQR(dataset[:,0])
+        y, y_out = calculate_IQR(dataset[:,1])
+        z, z_out = calculate_IQR(dataset[:,2])
     
-    x, x_out = calculate_IQR(dataset[:,0])
-    y, y_out = calculate_IQR(dataset[:,1])
-    s, s_out = calculate_IQR(dataset[:,2])
-
-    x_new = []
-    y_new = []
-    s_new = []
-    
-    for xi, yi, si in zip(x, y, s):
-        valid_x = all([xi != x_o for x_o in x_out])
-        valid_y = all([yi != y_o for y_o in y_out])
-        valid_s = all([si != s_o for s_o in s_out])
+        x_new = []
+        y_new = []
+        z_new = []
         
-        if valid_x and valid_y and valid_s:
-            x_new.append(xi)
-            y_new.append(yi)
-            s_new.append(si)
+        for xi, yi, zi in zip(x, y, z):
+            valid_x = all([xi != x_o for x_o in x_out])
+            valid_y = all([yi != y_o for y_o in y_out])
+            valid_z = all([zi != z_o for z_o in z_out])
+            
+            if valid_x and valid_y and valid_z:
+                x_new.append(xi)
+                y_new.append(yi)
+                z_new.append(zi)
     
-    offset_no = len(x)-len(x_new)
+        xyz_new = np.mean([x_new, y_new, z_new],axis=1)
+        
+        offset_no = len(x)-len(x_new)
     
-    return x_new, y_new, s_new, offset_no
+    return xyz_new, offset_no
 
 
 # Percentiles calculation
@@ -673,10 +716,46 @@ def calculate_IQR(data):
             data_IQR.append(d)
         else:
             outliers.append(d)
-    
+
     return data_IQR, outliers
 
 
+def check_colour_shape(img, shape, centroids, colour, threshold=100):
+    error = 0
+    px_percentage = 0
+    for det in shape:
+        cx,cy,s = det[0],det[1],det[2]
+        
+        ty = int(cy-s/2)
+        by = int(cy+s/2)
+        lx = int(cx-s/2)
+        rx = int(cx+s/2)
+        
+        mid = int(s/2)
+        
+        det_roi = img[ty:by,lx:rx :]
+        
+        d = np.zeros(3)
+        
+        # calculate euclidean distance
+        for c in range(3):
+            d[c] = np.linalg.norm(np.array(det_roi[mid,mid,:])-np.array(centroids[c]))#,axis=1
+        if (np.argsort(d)[0] != colour or min(d) > threshold):
+            error += 1
+        else:
+            n_colour_px = np.sum([det_roi[:,:,1]>100])#
+            # print(n_colour_px)
+            n_total_px = s**2
+            # print(n_total_px)
+            px_percentage = n_colour_px/n_total_px
+            # print(colour, px_percentage)
+            
+        
+        # fig = plt.figure()
+        # plt.imshow(cv.cvtColor(det_roi,cv.COLOR_HSV2BGR_FULL))#
+        # plt.show()
+    
+    return error, px_percentage
 
 
 # =============================================================================
